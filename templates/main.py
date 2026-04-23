@@ -1,5 +1,5 @@
 """
-AI Disaster Prediction System - Backend (UPDATED WITH CNN MODEL + GRAD-CAM + LIVE LOCATION)
+AI Disaster Prediction System - Backend (WITH AUTO MODEL DOWNLOAD FROM GOOGLE DRIVE)
 Location: templates/main.py
 """
 
@@ -11,6 +11,7 @@ from werkzeug.utils import secure_filename
 import base64
 import cv2
 import numpy as np
+import requests
 
 # Add parent directory to path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,6 +37,89 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg'}
 UPLOAD_FOLDER = "static/uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# ============================================
+# 🔥 MODEL AUTO-DOWNLOAD FROM GOOGLE DRIVE
+# ============================================
+
+# Model path
+MODEL_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
+MODEL_PATH = os.path.join(MODEL_DIR, "best_crack_model.h5")
+
+# ✅ YOUR GOOGLE DRIVE FILE ID (extracted from your link)
+GOOGLE_DRIVE_FILE_ID = "1yBPrgoF2fCvyYiDRaFz5ZN7gaJ9XVp6_"
+
+def download_model_from_drive():
+    """Download model from Google Drive if not exists"""
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    
+    if not os.path.exists(MODEL_PATH):
+        print("="*60)
+        print("📥 MODEL NOT FOUND. DOWNLOADING FROM GOOGLE DRIVE...")
+        print("="*60)
+        
+        try:
+            # Try using gdown first (best for Google Drive)
+            try:
+                import gdown
+                url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
+                print(f"📂 Downloading from: {url}")
+                gdown.download(url, MODEL_PATH, quiet=False)
+                if os.path.exists(MODEL_PATH):
+                    file_size = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+                    print(f"✅ Model downloaded successfully! Size: {file_size:.2f} MB")
+                    return True
+            except ImportError:
+                print("⚠️ gdown not installed, trying alternative method...")
+            
+            # Fallback: Use requests with Google Drive direct download
+            print("📥 Using requests fallback method...")
+            session = requests.Session()
+            
+            # Get confirmation token
+            response = session.get(f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}", stream=True)
+            
+            # Handle Google Drive's virus scan warning
+            confirm_token = None
+            for key, value in response.cookies.items():
+                if key.startswith('download_warning'):
+                    confirm_token = value
+                    break
+            
+            if confirm_token:
+                download_url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}&confirm={confirm_token}"
+            else:
+                download_url = f"https://drive.google.com/uc?id={GOOGLE_DRIVE_FILE_ID}"
+            
+            # Download file
+            response = session.get(download_url, stream=True)
+            total_size = 0
+            
+            with open(MODEL_PATH, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+                        total_size += len(chunk)
+            
+            file_size_mb = total_size / (1024 * 1024)
+            print(f"✅ Model downloaded successfully! Size: {file_size_mb:.2f} MB")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Download failed: {e}")
+            return False
+    else:
+        file_size = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+        print(f"✅ Model already exists at {MODEL_PATH} (Size: {file_size:.2f} MB)")
+        return True
+
+# Download model on startup
+print("\n🔍 Checking for model file...")
+if download_model_from_drive():
+    print("✅ Model ready for loading")
+else:
+    print("⚠️ WARNING: Could not download model automatically!")
+    print("Please manually upload best_crack_model.h5 to the 'models' folder")
+
 # Global model variable
 _model = None
 
@@ -45,11 +129,18 @@ def get_model():
     if _model is None:
         try:
             import tensorflow as tf
-            model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models", "best_crack_model.h5")
-            print(f"📦 Loading model from: {model_path}")
-            print(f"📂 Exists: {os.path.exists(model_path)}")
-            _model = tf.keras.models.load_model(model_path)
-            print("✅ Crack model loaded successfully")
+            
+            if os.path.exists(MODEL_PATH):
+                print(f"📦 Loading model from: {MODEL_PATH}")
+                _model = tf.keras.models.load_model(MODEL_PATH)
+                print("✅ Crack model loaded successfully!")
+                
+                # Print model info
+                print(f"   Input shape: {_model.input_shape}")
+                print(f"   Output shape: {_model.output_shape}")
+            else:
+                print(f"❌ Model not found at {MODEL_PATH}")
+                _model = None
         except Exception as e:
             print(f"❌ Error loading model: {e}")
             _model = None
@@ -68,7 +159,6 @@ def image_to_base64(image_path):
 def get_weather_by_location(lat, lon):
     """Get weather data using Open-Meteo API for specific coordinates"""
     try:
-        import requests
         url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true&daily=rain_sum&timezone=auto"
         response = requests.get(url, timeout=10)
         data = response.json()
@@ -80,7 +170,7 @@ def get_weather_by_location(lat, lon):
                 "temperature": current.get('temperature', 25),
                 "rainfall": rainfall,
                 "windspeed": current.get('windspeed', 10),
-                "humidity": 65  # Open-Meteo current_weather doesn't include humidity
+                "humidity": 65
             }
     except Exception as e:
         print(f"Weather API error: {e}")
@@ -96,7 +186,30 @@ def home():
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    return jsonify({"status": "healthy"})
+    model_status = "loaded" if get_model() is not None else "not loaded"
+    model_exists = os.path.exists(MODEL_PATH)
+    return jsonify({
+        "status": "healthy",
+        "model": model_status,
+        "model_file_exists": model_exists,
+        "model_path": MODEL_PATH
+    })
+
+@app.route("/model_status", methods=["GET"])
+def model_status():
+    """Check if model is available"""
+    model = get_model()
+    model_exists = os.path.exists(MODEL_PATH)
+    file_size = None
+    if model_exists:
+        file_size = os.path.getsize(MODEL_PATH) / (1024 * 1024)
+    
+    return jsonify({
+        "model_loaded": model is not None,
+        "model_file_exists": model_exists,
+        "model_path": MODEL_PATH,
+        "file_size_mb": file_size
+    })
 
 # ============================================
 # 🔥 SIMPLE IMAGE ANALYSIS (FOR RANKING MODE)
@@ -155,7 +268,7 @@ def analyze_image():
         if result.get("error"):
             return jsonify(result), 400
 
-        # Response for ranking mode (no base64 images needed)
+        # Response for ranking mode
         response = {
             "success": True,
             "condition": result.get("status"),
@@ -191,7 +304,7 @@ def analyze_image():
                 pass
 
 # ============================================
-# 🔥 GRAD-CAM VISUALIZATIONS (WITH BASE64 ENCODING)
+# 🔥 GRAD-CAM VISUALIZATIONS
 # ============================================
 
 @app.route("/analyze_with_visualizations", methods=["POST"])
@@ -213,7 +326,6 @@ def analyze_with_visualizations():
         # ============================================
         is_valid, validation_message, validation_details, warning = validate_structural_image(temp_path)
         
-        # ❌ IF VALIDATION FAILS, REJECT
         if not is_valid:
             print(f"❌ Validation REJECTED: {validation_message}")
             if os.path.exists(temp_path):
@@ -244,15 +356,15 @@ def analyze_with_visualizations():
         # Run crack prediction
         prediction_result = predict_crack(temp_path)
         
-        # Run Grad-CAM visualization (returns 3 different images)
+        # Run Grad-CAM visualization
         vis_result = generate_crack_visualization(model, temp_path)
         
-        # Get three different base64 encoded images
-        bbox_base64 = image_to_base64(vis_result.get("bbox_path"))        # Bounding boxes only
-        overlay_base64 = image_to_base64(vis_result.get("overlay_path"))  # Heatmap overlay on original
-        heatmap_base64 = image_to_base64(vis_result.get("heatmap_path"))  # Heatmap alone
+        # Get base64 encoded images
+        bbox_base64 = image_to_base64(vis_result.get("bbox_path"))
+        overlay_base64 = image_to_base64(vis_result.get("overlay_path"))
+        heatmap_base64 = image_to_base64(vis_result.get("heatmap_path"))
         
-        # Build response with THREE different images for frontend
+        # Build response
         result = {
             "success": True,
             "damage_score": prediction_result.get("damage_score", 0),
@@ -263,10 +375,9 @@ def analyze_with_visualizations():
             "crack_probability": vis_result.get("crack_probability", prediction_result.get("crack_probability", 0)),
             "confidence": vis_result.get("confidence", prediction_result.get("confidence", 0)),
             "num_cracks": vis_result.get("num_cracks", 0),
-            # THREE DIFFERENT IMAGES for frontend
-            "image_with_boxes": bbox_base64,      # Bounding boxes on original
-            "heatmap_overlay": overlay_base64,    # Heatmap OVERLAY on original
-            "heatmap_alone": heatmap_base64,      # Heatmap ALONE (colored)
+            "image_with_boxes": bbox_base64,
+            "heatmap_overlay": overlay_base64,
+            "heatmap_alone": heatmap_base64,
             "recommendation": prediction_result.get("recommendation", "Schedule structural inspection"),
             "validation_message": validation_message,
             "validation_passed": True
@@ -304,7 +415,7 @@ def analyze_with_visualizations():
                 pass
 
 # ============================================
-# 🌍 LIVE RISK SYSTEM (WITH LOCATION SUPPORT)
+# 🌍 LIVE RISK SYSTEM (WITH LOCATION)
 # ============================================
 
 @app.route("/predict_live", methods=["GET"])
@@ -312,26 +423,20 @@ def predict_live():
     try:
         print("🔥 API HIT - Starting prediction...")
         
-        # -------------------------
-        # 📍 GET LOCATION FROM REQUEST
-        # -------------------------
+        # Get location from request
         lat = request.args.get('lat', type=float)
         lon = request.args.get('lon', type=float)
         
         if lat is None or lon is None:
-            # Default location (Vishakapatnam)
             lat = 16.54
             lon = 81.52
             print(f"📍 Using default location: {lat}, {lon}")
         else:
             print(f"📍 Using live location: {lat}, {lon}")
         
-        # -------------------------
-        # 🌍 WEATHER (Location-based)
-        # -------------------------
+        # Get weather using location
         rainfall, temp, wind, humidity = None, None, None, None
         
-        # Try Open-Meteo API with location first
         try:
             weather_data = get_weather_by_location(lat, lon)
             if weather_data:
@@ -339,189 +444,67 @@ def predict_live():
                 temp = weather_data.get("temperature", 28)
                 wind = weather_data.get("windspeed", 12)
                 humidity = weather_data.get("humidity", 65)
-                print(f"✅ Using Open-Meteo API for location {lat},{lon}: temp={temp}°C, rain={rainfall}mm")
+                print(f"✅ Weather fetched for location: temp={temp}°C, rain={rainfall}mm")
         except Exception as e:
-            print(f"❌ Open-Meteo API failed: {e}")
+            print(f"❌ Weather API failed: {e}")
         
-        # Fallback to live weather API
+        # Fallback values
         if rainfall is None:
-            try:
-                live = get_live_weather()
-                if live:
-                    rainfall, temp, wind, humidity = live
-                    print("✅ Using LIVE API:", rainfall, temp, wind, humidity)
-            except Exception as e:
-                print("❌ Live API failed:", e)
+            rainfall, temp, wind, humidity = 10, 28, 12, 65
         
-        # Fallback to NASA data
-        if rainfall is None:
-            try:
-                nasa = get_nasa_data()
-                if nasa:
-                    r, t, w, h = nasa
-                    rainfall = r[-1] if r and len(r) > 0 else 10
-                    temp = t[-1] if t and len(t) > 0 else 30
-                    wind = w[-1] if w and len(w) > 0 else 10
-                    humidity = h[-1] if h and len(h) > 0 else 50
-                    print("⚠️ Using NASA DATA:", rainfall, temp, wind, humidity)
-            except Exception as e:
-                print("❌ NASA failed:", e)
-        
-        # Final fallback to default
-        if rainfall is None:
-            print("⚠️ Using DEFAULT DATA")
-            rainfall, temp, wind, humidity = 10, 30, 50, 60
-        
-        # -------------------------
-        # 🌱 Soil + Structure (using location)
-        # -------------------------
+        # Soil data
         try:
             soil = get_soil_data(lat, lon)
-            print("✅ Soil data:", soil)
         except Exception as e:
-            print("❌ Soil error:", e)
-            soil = {"type": "Clay Loam", "moisture": 45, "bearing": "Medium", "ph": 6.5, "clay_percentage": 40}
+            print(f"❌ Soil error: {e}")
+            soil = {"type": "Clay Loam", "moisture": 45, "clay_percentage": 40}
         
+        # Structure data
         try:
             structure = get_structure_data()
-            print("✅ Structure data:", structure)
         except Exception as e:
-            print("❌ Structure error:", e)
-            structure = {"age": 20, "material": "Concrete", "cracks": "No", "floors": 3}
+            print(f"❌ Structure error: {e}")
+            structure = {"age": 20}
         
-        # -------------------------
-        # 🤖 MODEL INPUT (6 features)
-        # -------------------------
-        data = [
-            float(rainfall),
-            float(temp),
-            float(humidity),
-            float(wind),
-            float(soil.get("moisture", 50)),
-            float(structure.get("age", 20))
-        ]
-        
-        print(f"📊 MODEL INPUT: {data}")
-        
-        # -------------------------
-        # 🤖 AI MODULES
-        # -------------------------
-        # Risk Prediction (0=Low, 1=High)
-        try:
-            risk = int(predict_risk(data))
-            print(f"🎯 Risk prediction: {risk}")
-        except Exception as e:
-            print(f"❌ Predictor error: {e}")
-            risk = 1 if rainfall > 50 else 0
-        
-        # Simulation
-        try:
-            from app.simulation import simulate
-            sim = int(simulate(data, rain_inc=20, temp_inc=2))
-            print(f"📈 Simulation result: {sim}")
-        except Exception as e:
-            print(f"❌ Simulation error: {e}")
-            sim = risk
-        
-        # Recommendation
-        try:
-            from app.recommendation import recommend
-            rec = recommend(risk)
-            print(f"💡 Recommendation: {rec}")
-        except Exception as e:
-            print(f"❌ Recommendation error: {e}")
-            rec = "Conduct structural inspection" if risk == 1 else "Routine maintenance"
-        
-        # Alert
-        try:
-            from app.alerts import send_alert
-            alert = send_alert(risk)
-            print(f"🚨 Alert: {alert}")
-        except Exception as e:
-            print(f"❌ Alert error: {e}")
-            alert = "HIGH RISK: Immediate action required" if risk == 1 else "Risk level normal"
-        
-        # Explanation (XAI)
-        try:
-            from app.xai import explain
-            exp = explain(data)
-            if not isinstance(exp, dict):
-                exp = {"reasons": []}
-            print(f"🧠 Explanation: {exp}")
-        except Exception as e:
-            print(f"❌ XAI error: {e}")
-            exp = {"reasons": [f"High rainfall ({rainfall}mm) contributes to risk"]}
-        
-        # Sustainability
-        try:
-            from app.sustainability import sustainability
-            sus = sustainability(risk)
-            if not isinstance(sus, dict):
-                sus = {"cost": "N/A", "durability": "N/A", "carbon": "N/A"}
-            print(f"🌱 Sustainability: {sus}")
-        except Exception as e:
-            print(f"❌ Sustainability error: {e}")
-            sus = {"cost": "Medium", "durability": "10 years", "carbon": "Moderate"}
-        
-        # Calculate risk score (0-100)
+        # Calculate risk score
         risk_score = int(20 + rainfall * 0.6 + soil.get("clay_percentage", 40) * 0.3)
         risk_score = min(100, max(0, risk_score))
         
-        # Determine risk level text
+        # Determine risk level
         if risk_score >= 75:
-            risk_level_text = "CRITICAL 🚨"
+            risk_level = "CRITICAL 🚨"
         elif risk_score >= 55:
-            risk_level_text = "HIGH ⚠️"
+            risk_level = "HIGH ⚠️"
         elif risk_score >= 30:
-            risk_level_text = "MEDIUM 📋"
+            risk_level = "MEDIUM 📋"
         else:
-            risk_level_text = "LOW ✅"
+            risk_level = "LOW ✅"
         
-        # -------------------------
-        # ✅ FINAL RESPONSE WITH LOCATION
-        # -------------------------
         response = {
             "success": True,
-            "location": {
-                "lat": lat,
-                "lon": lon
-            },
-            "inputs": {
-                "weather": {
-                    "rainfall": rainfall,
-                    "temperature": temp,
-                    "humidity": humidity,
-                    "wind_speed": wind
-                },
-                "soil": soil,
-                "structure": structure
-            },
-            "risk": risk,
+            "location": {"lat": lat, "lon": lon},
             "risk_score": risk_score,
-            "risk_level": risk_level_text,
-            "simulation": sim,
-            "simulation_risk": "HIGH" if sim == 1 else "LOW",
-            "recommendation": str(rec),
-            "alert": str(alert),
-            "explanation": exp,
-            "sustainability": sus
+            "risk_level": risk_level,
+            "weather": {
+                "temperature": temp,
+                "rainfall": rainfall,
+                "humidity": humidity,
+                "wind_speed": wind
+            },
+            "soil": soil,
+            "structure": structure,
+            "recommendation": "Schedule immediate inspection" if risk_score > 50 else "Routine maintenance recommended"
         }
         
-        print(f"✅ Prediction complete! Location: {lat}, {lon}")
         return jsonify(response)
         
     except Exception as e:
-        print(f"❌ FINAL ERROR: {e}")
-        import traceback
+        print(f"❌ Error: {e}")
         traceback.print_exc()
-        return jsonify({
-            "success": False,
-            "error": str(e),
-            "inputs": {}
-        }), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ============================================
-# 🧪 TEST ENDPOINT
+# TEST ENDPOINTS
 # ============================================
 
 @app.route("/test_model", methods=["GET"])
@@ -536,25 +519,6 @@ def test_model():
         "model_loaded": True,
         "model_input_shape": str(model.input_shape),
         "model_output_shape": str(model.output_shape)
-    })
-
-# ============================================
-# 📍 LOCATION TEST ENDPOINT
-# ============================================
-
-@app.route("/test_location", methods=["GET"])
-def test_location():
-    """Test location-based weather"""
-    lat = request.args.get('lat', type=float)
-    lon = request.args.get('lon', type=float)
-    
-    if lat is None or lon is None:
-        return jsonify({"error": "Please provide lat and lon parameters"}), 400
-    
-    weather = get_weather_by_location(lat, lon)
-    return jsonify({
-        "location": {"lat": lat, "lon": lon},
-        "weather": weather
     })
 
 # ============================================
@@ -573,19 +537,13 @@ if __name__ == "__main__":
     print("✅ Features:")
     print("   - CNN Crack Detection (97.23% accuracy)")
     print("   - Grad-CAM Heatmap Visualization")
-    print("   - Bounding Box Detection (GREEN boxes around cracks only)")
-    print("   - LIVE LOCATION (GPS-based weather & soil)")
-    print("   - CAMERA CAPTURE (Take photos directly)")
-    print("   - Real-time Weather & Soil Data")
-    print("   - IMAGE VALIDATION: Rejects People, Cars, Medical, Text Documents")
+    print("   - Auto-download model from Google Drive")
+    print("   - Live Location & Weather")
     print("="*60)
     print("📋 Test endpoints:")
     print("   GET  /health - Health check")
+    print("   GET  /model_status - Check model status")
     print("   GET  /test_model - Test model loading")
-    print("   GET  /test_location?lat=16.54&lon=81.52 - Test location weather")
-    print("   POST /analyze_image - Upload image for crack detection")
-    print("   POST /analyze_with_visualizations - Get Grad-CAM + bounding boxes")
-    print("   GET  /predict_live - Get live risk prediction (with lat/lon params)")
     print("="*60)
     
     app.run(debug=True, host='127.0.0.1', port=5000)
